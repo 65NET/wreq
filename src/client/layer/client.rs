@@ -47,7 +47,9 @@ use crate::{
         proxy,
     },
     error::ProxyConnect,
+    group::Group,
     rt::{Executor, Timer},
+    tls::TlsOptions,
 };
 
 /// A HttpClient to make outgoing HTTP requests.
@@ -479,6 +481,32 @@ where
                 }
             }
         }
+    }
+
+    /// Establish — or find pooled — the connection a request to `uri` would
+    /// use, without sending anything on it, and leave it in the pool.
+    ///
+    /// The descriptor is the one a request with no per-request options gets
+    /// (`Group::default()`, no version pin, no proxy override), so the pool key
+    /// is the same key the next such request checks out under. `tls_options`
+    /// replaces the client's TLS options for this dial only; they are not part
+    /// of the key.
+    ///
+    /// Returns the connection's metadata, which carries the ALPN protocol the
+    /// transport negotiated.
+    pub(crate) async fn connect_only(
+        &self,
+        uri: Uri,
+        tls_options: Option<TlsOptions>,
+    ) -> Result<Connected, Error> {
+        let uri = base_uri(&uri)?;
+        let descriptor =
+            ConnectionDescriptor::new(uri, Group::default(), None, None, tls_options, None);
+        let pooled = self.connection_for(descriptor).await?;
+        // Dropping `pooled` is what leaves the connection behind for the next
+        // request: an idle HTTP/1 connection goes back into the pool, an HTTP/2
+        // one was shared from the moment it was pooled.
+        Ok(pooled.conn_info.clone())
     }
 
     fn connect_to(
@@ -1086,20 +1114,31 @@ fn authority_form(uri: &mut Uri) {
     };
 }
 
+fn build_base_uri(scheme: Scheme, authority: Authority) -> Uri {
+    Uri::builder()
+        .scheme(scheme)
+        .authority(authority)
+        .path_and_query(PathAndQuery::from_static("/"))
+        .build()
+        .expect("valid base URI")
+}
+
+/// The pool key's URI for an absolute-form `uri`: scheme and authority, `/`.
+fn base_uri(uri: &Uri) -> Result<Uri, Error> {
+    match (uri.scheme(), uri.authority()) {
+        (Some(scheme), Some(auth)) => Ok(build_base_uri(scheme.clone(), auth.clone())),
+        _ => {
+            debug!("Client requires absolute-form URIs, received: {:?}", uri);
+            Err(e!(UserAbsoluteUriRequired))
+        }
+    }
+}
+
 fn normalize_uri<B>(req: &mut Request<B>, is_http_connect: bool) -> Result<Uri, Error> {
     let uri = req.uri().clone();
 
-    let build_base_uri = |scheme: Scheme, authority: Authority| {
-        Uri::builder()
-            .scheme(scheme)
-            .authority(authority)
-            .path_and_query(PathAndQuery::from_static("/"))
-            .build()
-            .expect("valid base URI")
-    };
-
     match (uri.scheme(), uri.authority()) {
-        (Some(scheme), Some(auth)) => Ok(build_base_uri(scheme.clone(), auth.clone())),
+        (Some(_), Some(_)) => base_uri(&uri),
         (None, Some(auth)) if is_http_connect => {
             let scheme = match auth.port_u16() {
                 Some(443) => Scheme::HTTPS,

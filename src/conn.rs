@@ -20,6 +20,7 @@ use std::{
 };
 
 use ::http::{Extensions, HeaderMap, HeaderValue};
+use bytes::Bytes;
 #[cfg(any(feature = "tokio-rt", feature = "compio-rt"))]
 use net::TcpConnector;
 use pin_project_lite::pin_project;
@@ -150,6 +151,9 @@ struct ProxyIdentity {
 #[derive(Debug, Clone)]
 pub struct Connected {
     alpn: Alpn,
+    /// The ALPN protocol the transport negotiated, verbatim, or `None` when
+    /// the peer selected none (or the transport is not TLS).
+    negotiated_alpn: Option<Bytes>,
     proxy: Box<ProxyIdentity>,
     extra: Option<Extra>,
     poisoned: PoisonPill,
@@ -230,13 +234,9 @@ where
     T: Connection,
 {
     fn connected(&self) -> Connected {
-        let connected = self.stream.get_ref().connected();
-        if self
-            .stream
-            .ssl()
-            .selected_alpn_protocol()
-            .is_some_and(|alpn| AlpnProtocol::HTTP2.eq(alpn))
-        {
+        let alpn = self.stream.ssl().selected_alpn_protocol();
+        let connected = self.stream.get_ref().connected().alpn(alpn);
+        if alpn.is_some_and(|alpn| AlpnProtocol::HTTP2.eq(alpn)) {
             connected.negotiated_h2()
         } else {
             connected
@@ -329,6 +329,7 @@ impl Connected {
     pub fn new() -> Connected {
         Connected {
             alpn: Alpn::None,
+            negotiated_alpn: None,
             proxy: Box::new(ProxyIdentity::default()),
             extra: None,
             poisoned: PoisonPill::healthy(),
@@ -397,6 +398,20 @@ impl Connected {
     #[inline]
     pub fn is_negotiated_h2(&self) -> bool {
         self.alpn == Alpn::H2
+    }
+
+    /// Record the ALPN protocol the transport negotiated, verbatim.
+    #[inline]
+    pub fn alpn(mut self, alpn: Option<&[u8]>) -> Connected {
+        self.negotiated_alpn = alpn.map(Bytes::copy_from_slice);
+        self
+    }
+
+    /// The ALPN protocol the transport negotiated, verbatim: `b"h2"`,
+    /// `b"http/1.1"`, or `None` when the peer selected none.
+    #[inline]
+    pub fn alpn_protocol(&self) -> Option<&[u8]> {
+        self.negotiated_alpn.as_deref()
     }
 
     /// Determine if this connection is poisoned

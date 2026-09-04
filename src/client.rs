@@ -22,6 +22,7 @@ use std::{
     time::Duration,
 };
 
+use bytes::Bytes;
 use http::header::{HeaderMap, HeaderValue, USER_AGENT};
 use tower::{
     BoxError, Layer, Service, ServiceBuilder, ServiceExt,
@@ -151,7 +152,15 @@ type BoxedClientServiceLayer = BoxCloneSyncServiceLayer<
 ///
 /// [`Rc`]: std::rc::Rc
 #[derive(Clone)]
-pub struct Client(Arc<Either<ClientService, BoxedClientService>>);
+pub struct Client(Arc<ClientRef>);
+
+/// The service stack a request goes through, and the [`HttpClient`] at the
+/// bottom of it, kept separately so a connection can be established without a
+/// request ([`Client::connect`]) against the same connector and pool.
+struct ClientRef {
+    service: Either<ClientService, BoxedClientService>,
+    http: HttpClient<Connector, Body>,
+}
 
 /// A [`ClientBuilder`] can be used to create a [`Client`] with custom configuration.
 #[must_use]
@@ -425,8 +434,37 @@ impl Client {
         let req = http::Request::<Body>::from(request);
         Pending::Request {
             uri: Some(req.uri().clone()),
-            fut: Box::pin(Oneshot::new((*self.0).clone(), req)),
+            fut: Box::pin(Oneshot::new(self.0.service.clone(), req)),
         }
+    }
+
+    /// Open — or find in the pool — this client's connection to the origin of
+    /// `uri`, sending nothing on it, and return the ALPN protocol it negotiated.
+    ///
+    /// The connection is established exactly as a request to `uri` with no
+    /// per-request options would establish it: the same connector, proxy,
+    /// emulation and pool key. It is left in the pool, so the next such request
+    /// to the same origin reuses it instead of dialling again — the origin
+    /// sees one connection. `tls_options` replaces the client's TLS options
+    /// for this dial only (the ALPN list offered, say); they are not part of
+    /// the pool key.
+    ///
+    /// `Ok(None)` is a completed connection on which the peer selected no ALPN
+    /// protocol (or a plaintext one). This applies no request timeout; bound
+    /// the future yourself.
+    pub async fn connect<U: IntoUri>(
+        &self,
+        uri: U,
+        tls_options: Option<TlsOptions>,
+    ) -> crate::Result<Option<Bytes>> {
+        let uri = uri.into_uri()?;
+        let connected = self
+            .0
+            .http
+            .connect_only(uri.clone(), tls_options)
+            .await
+            .map_err(|err| Error::request(err).with_uri(uri))?;
+        Ok(connected.alpn_protocol().map(Bytes::copy_from_slice))
     }
 }
 
@@ -580,9 +618,11 @@ impl ClientBuilder {
                 .pool_max_size(config.pool_max_size)
                 .build(connector)
         };
+        let http: HttpClient<Connector, Body> = service;
 
         // Configured client service with layers
         let client = {
+            let service = http.clone();
             let service = ServiceBuilder::new()
                 .layer(RetryLayer::new(RetryPolicy::new(config.retry_policy)))
                 .layer({
@@ -634,7 +674,10 @@ impl ClientBuilder {
             }
         };
 
-        Ok(Client(Arc::new(client)))
+        Ok(Client(Arc::new(ClientRef {
+            service: client,
+            http,
+        })))
     }
 
     // Runtime options
