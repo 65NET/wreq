@@ -205,6 +205,16 @@ pub struct TlsOptions {
     /// **Default:** `None` (implementation default)
     pub grease_enabled: Option<bool>,
 
+    /// Controls whether a GREASE value is included in the
+    /// `signature_algorithms` extension ([RFC 8701](https://datatracker.ietf.org/doc/html/rfc8701)).
+    ///
+    /// This is separate from [`TlsOptions::grease_enabled`]: Chrome began
+    /// GREASING `signature_algorithms` at M152, long after it GREASED the
+    /// cipher, group and extension lists.
+    ///
+    /// **Default:** `None` (implementation default)
+    pub grease_sigalgs_enabled: Option<bool>,
+
     /// Enables OCSP stapling for the connection.
     ///
     /// **Default:** `false`
@@ -247,6 +257,24 @@ pub struct TlsOptions {
     ///
     /// **Default:** `None`
     pub delegated_credentials: Option<Cow<'static, str>>,
+
+    /// Trust anchor IDs to request via the TLS 1.3 `trust_anchors` extension
+    /// (codepoint `0xca34`, [draft-ietf-tls-trust-anchor-ids]).
+    ///
+    /// The value is the wire encoding of the ID list -- a sequence of
+    /// non-empty, one-byte length-prefixed IDs -- *without* the extension's
+    /// outer 16-bit length. This crate does not parse or reshape it, but
+    /// BoringSSL does validate the encoding (`ssl_is_valid_trust_anchor_list`),
+    /// so a malformed list is reported as a TLS error when the connector is
+    /// built rather than being sent.
+    ///
+    /// `None` omits the extension. `Some` of an empty slice still sends it,
+    /// which is how a peer signals retry-flow support without naming an anchor.
+    ///
+    /// **Default:** `None`
+    ///
+    /// [draft-ietf-tls-trust-anchor-ids]: https://datatracker.ietf.org/doc/draft-ietf-tls-trust-anchor-ids/
+    pub requested_trust_anchors: Option<Cow<'static, [u8]>>,
 
     /// List of supported elliptic curves.
     ///
@@ -379,6 +407,16 @@ impl TlsOptionsBuilder {
         self
     }
 
+    /// Sets the `signature_algorithms` GREASE flag.
+    #[inline]
+    pub fn grease_sigalgs_enabled<T>(mut self, enabled: T) -> Self
+    where
+        T: Into<Option<bool>>,
+    {
+        self.config.grease_sigalgs_enabled = enabled.into();
+        self
+    }
+
     /// Sets the OCSP stapling flag.
     #[inline]
     pub fn enable_ocsp_stapling(mut self, enabled: bool) -> Self {
@@ -428,6 +466,16 @@ impl TlsOptionsBuilder {
         T: Into<Cow<'static, str>>,
     {
         self.config.delegated_credentials = Some(creds.into());
+        self
+    }
+
+    /// Sets the trust anchor IDs sent in the `trust_anchors` extension.
+    #[inline]
+    pub fn requested_trust_anchors<T>(mut self, ids: T) -> Self
+    where
+        T: Into<Cow<'static, [u8]>>,
+    {
+        self.config.requested_trust_anchors = Some(ids.into());
         self
     }
 
@@ -558,6 +606,7 @@ impl Default for TlsOptions {
             enable_ech_grease: false,
             permute_extensions: None,
             grease_enabled: None,
+            grease_sigalgs_enabled: None,
             enable_ocsp_stapling: false,
             enable_signed_cert_timestamps: false,
             record_size_limit: None,
@@ -566,6 +615,7 @@ impl Default for TlsOptions {
             psk_dhe_ke: true,
             renegotiation: true,
             delegated_credentials: None,
+            requested_trust_anchors: None,
             curves_list: None,
             cipher_list: None,
             sigalgs_list: None,

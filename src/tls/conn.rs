@@ -393,6 +393,14 @@ impl TlsConnectorBuilder {
         // Set TLS grease options
         set_option!(opts, grease_enabled, connector, set_grease_enabled);
 
+        // Set TLS signature-algorithm GREASE options
+        set_option!(
+            opts,
+            grease_sigalgs_enabled,
+            connector,
+            set_grease_sigalgs_enabled
+        );
+
         // Set TLS permute extensions options
         set_option!(opts, permute_extensions, connector, set_permute_extensions);
 
@@ -420,6 +428,13 @@ impl TlsConnectorBuilder {
             connector,
             set_delegated_credentials
         );
+
+        // Set TLS requested trust anchors (extension 0xca34)
+        if let Some(ref ids) = opts.requested_trust_anchors {
+            connector
+                .set_requested_trust_anchors(ids)
+                .map_err(Error::tls)?;
+        }
 
         // Set TLS record size limit
         set_option!(opts, record_size_limit, connector, set_record_size_limit);
