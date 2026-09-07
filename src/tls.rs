@@ -263,7 +263,10 @@ pub struct TlsOptions {
     ///
     /// The value is the wire encoding of the ID list -- a sequence of
     /// non-empty, one-byte length-prefixed IDs -- *without* the extension's
-    /// outer 16-bit length. It is passed through opaquely.
+    /// outer 16-bit length. This crate does not parse or reshape it, but
+    /// BoringSSL does validate the encoding (`ssl_is_valid_trust_anchor_list`),
+    /// so a malformed list is reported as a TLS error when the connector is
+    /// built rather than being sent.
     ///
     /// `None` omits the extension. `Some` of an empty slice still sends it,
     /// which is how a peer signals retry-flow support without naming an anchor.
